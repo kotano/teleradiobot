@@ -1,3 +1,13 @@
+"""Teleradiobot
+
+
+TODO:
+    * Add tests
+    * Better keyboard
+    * Handle exceptions
+    * Add localization
+"""
+
 import json
 from pprint import pprint
 
@@ -10,21 +20,31 @@ with open("config.json", 'r') as conf:
 bot = telebot.TeleBot(config["token"], parse_mode="Markdown")
 
 COMMANDS = {
-    "/help": "Get help.",
-    "/authorize": "authorize yourself",
-    "/tune": "Tune the radio.",
-    "/detune": "Detune the radio.",
-    "/broadcast": "Start broadcasting.",
-    "/endbroadcast": "End broadcasting.",
-    "/changepassword": "Change access password.",
+    "help": "Get help.",
+    "howto": "Get explanaition on how to use bot.",
+    "authorize": "authorize yourself",
+    "tune": "Tune the radio.",
+    "detune": "Detune the radio.",
+    "broadcast": "Start broadcasting.",
+    "endbroadcast": "End broadcasting.",
+    "changepassword": "Change access password.",
 }
 
-broadcasting = False
 
-main_types = [
-    'audio', 'photo', 'voice', 'video', 'document',
-    'text', 'location', 'contact', 'sticker']
-"""List with all common message types."""
+class Broadcast(object):
+    def __init__(self) -> None:
+        self.active = False
+
+    def show_keyboard(self):
+        if self.active:
+            keyboard = make_keyboard(
+                firstrow=[' ', '/endbroadcast'], width=2)
+        else:
+            keyboard = make_keyboard(['/broadcast', ' '])
+        return keyboard
+
+
+broadcast = Broadcast()
 
 
 # @
@@ -44,7 +64,7 @@ def check_permissions(func):
     return inner
 
 
-def make_keyboard(first, extra=[], width=1, last=''):
+def make_keyboard(firstrow=[], extra=[], width=1, last='/help', kwargs={}):
     """Add reply keyboard
 
         Parameters:
@@ -52,9 +72,9 @@ def make_keyboard(first, extra=[], width=1, last=''):
             width(int): max width of rows
             cancel(bool): set to False if you don't want cancel btn to appear
     """
-    keyb = telebot.types.ReplyKeyboardMarkup(row_width=width)
-    first, *extra = extra
-    keyb.row(first)
+    keyb = telebot.types.ReplyKeyboardMarkup(row_width=width, **kwargs)
+    if firstrow:
+        keyb.row(*firstrow)
     if extra:
         keyb.add(*extra)
     if last:
@@ -62,13 +82,18 @@ def make_keyboard(first, extra=[], width=1, last=''):
     return keyb
 
 
-K_MAIN = make_keyboard(['/broadcast'],)
+K_MAIN = broadcast.show_keyboard()
 
 
 def update_config():
     pprint(config)
     with open("config.json", 'w') as conf:
-        json.dump(config, conf)
+        json.dump(config, conf, indent=4)
+
+
+def send_to_admins(message, **kwargs):
+    for uid in _get_admin_ids():
+        bot.send_message(uid, message, **kwargs)
 
 
 def _get_admin_names():
@@ -83,6 +108,10 @@ def _get_admin_ids():
 
 def _get_receivers():
     return config["receivers"]
+
+
+def _stop_broadcast():
+    broadcast.active = False
 
 
 def _add_receiver(receiver_id):
@@ -101,31 +130,40 @@ def _add_admin(username, uid):
 
 
 # COMMANDS
+
+
 @bot.message_handler(commands=['help', 'start'])
 def get_help(message):
     info = '\n'.join(
-        ["{}: {}".format(command, description)
+        ["/{}: {}".format(command, description)
          for command, description in COMMANDS.items()])
-    bot.reply_to(message, info)
+    bot.reply_to(message, info, reply_markup=K_MAIN)
+
+
+@bot.message_handler(commands=['howto'])
+def command_how_to(message):
+    instructions = "Here is how to"
+    bot.send_message(message.from_user.id, instructions)
 
 
 # AUTHORIZATION
+
+
 @bot.message_handler(commands=["authorize"])
 def authorize(message):
     if not message.chat.type == "private":
         return bot.reply_to(message, "Let's find some private place.")
+    if message.from_user.id in _get_admin_ids():
+        bot.reply_to(message, "You're already authorized.")
+        return
     msg = bot.reply_to(
         message, "Password: ")
     bot.register_next_step_handler(msg, grant_access)
 
 
 def grant_access(message):
-    """Add permission to user to broadcast"""
+    """Add user permission to broadcast."""
     cid = message.chat.id
-    uid = message.from_user.id
-
-    if uid in _get_admin_ids():
-        return bot.reply_to(message, "You're already authorized.")
 
     if message.text == config["password"]:
         _add_admin(message.chat.username, message.chat.id)
@@ -138,32 +176,34 @@ def grant_access(message):
 
 
 @bot.message_handler(commands=["changepassword"])
-@check_permissions
 def change_password(message):
     """Change access password using bot's token."""
-    if message.text:
-        pass
+    force_reply = telebot.types.ForceReply()
+    cid = message.chat.id
 
+    def handle_new_password(token):
+        if token.text == config["token"]:
+            def change_password(new_password):
+                config["admins"] = []
+                config["password"] = new_password.text  # TODO: Refactor
+                update_config()
+                bot.send_message(
+                    message.chat.id,
+                    "Access password changed. Please, /authorize again.")
 
-# BROADCASTING
-@bot.message_handler(commands=["broadcast"])
-@check_permissions
-def start_broadcast(message):
-    """Start broadcasting messages to all your receivers."""
-    bot.send_message(message.chat.id, "Now everyone listens...")
-    global broadcasting
-    broadcasting = True
+            msg = bot.send_message(
+                cid, "Enter new password", reply_markup=force_reply)
+            bot.register_next_step_handler(msg, change_password)
+        else:
+            return bot.reply_to(message, "Something went wrong.")
 
-
-@bot.message_handler(commands=['endbroadcast'])
-@check_permissions
-def stop_broadcast(message):
-    global broadcasting
-    broadcasting = False
-    bot.send_message(message.chat.id, "We are alone now.")
+    reply = bot.reply_to(message, 'Bot token: ', reply_markup=force_reply)
+    bot.register_next_step_handler(reply, handle_new_password)
 
 
 # RECEIVER
+
+
 @bot.message_handler(commands=['tune'])
 @check_permissions
 def tune(message):
@@ -196,42 +236,115 @@ def detune(message):
         "Radioo")
 
 
-@bot.message_handler(content_types=main_types)
+# BROADCASTING
+
+
+@bot.message_handler(commands=["broadcast"])
+@check_permissions
+def start_broadcast(message):
+    """Start broadcasting messages to all your receivers."""
+    broadcast.active = True
+    user = message.from_user.username
+    send_to_admins(
+        "{} started broadcasting.".format(user),
+        reply_markup=broadcast.show_keyboard(),
+        disable_notification=True)
+
+
+@bot.message_handler(commands=['endbroadcast'])
+@check_permissions
+def stop_broadcast(message):
+    _stop_broadcast()
+    send_to_admins(
+        "Broadcast stopped.",
+        reply_markup=broadcast.show_keyboard())
+
+
+main_content_types = [
+    'audio', 'photo', 'voice', 'video', 'document',
+    'text', 'location', 'contact', 'sticker', 'venue', 'poll']
+"""List with all common message types."""
+
+
+@bot.message_handler(content_types=main_content_types)
 def transmit(message):
-    pprint(message.__dict__)
-    pprint(message.chat)
     if any([
-            not broadcasting,
+            not broadcast.active,
             message.chat.type != 'private',
             message.from_user.id not in _get_admin_ids()]):
         return
 
     mtype = message.content_type
-    func, content = None, None  # Made to avoid linter problems.
-    if mtype == 'sticker':
-        # f = bot.send_sticker(cid, message.sticker.file_id)
-        func = bot.send_sticker
-        content = message.sticker.file_id
-    elif mtype == 'photo':
-        # bot.send_photo(cid, message.photo[-1].file_id)
-        func = bot.send_photo
-        content = message.photo[-1].file_id
-    elif mtype == 'document':
-        pass
-    else:
-        # bot.send_message(cid, message.text)
+    func, content = None, []  # Made to avoid linter problems.
+    kwargs = {"disable_notification": True}
+    if mtype == 'text':
         func = bot.send_message
-        content = message.text
+        content = [message.text]
+    elif mtype == 'sticker':
+        func = bot.send_sticker
+        content = [message.sticker.file_id]
+    elif mtype == 'photo':
+        func = bot.send_photo
+        content = [message.photo[-1].file_id]
+    elif mtype == 'audio':
+        func = bot.send_audio
+        content = [message.audio.file_id]
+    elif mtype == 'voice':
+        func = bot.send_voice
+        content = [message.voice.file_id]
+    elif mtype == 'document':
+        func = bot.send_document
+        content = [message.document.file_id]
+    elif mtype == 'contact':
+        func = bot.send_contact()
+        content = [message.contact.phone_name, message.contact.first_name]
+    elif mtype == 'poll':
+        poll = message.poll
+        func = bot.send_poll
+        opts = list([option.text for option in poll.options])
+        content = [poll.question, opts]
+        kwargs = {**message.json['poll']}
+        del kwargs['options'], kwargs['id'], kwargs['total_voter_count'], \
+            kwargs['question']
+    elif mtype == 'video':
+        func = bot.send_video
+        content = [message.video.file_id]
+    elif mtype == 'video_note':
+        func = bot.send_video_note
+        content = [message.video_note]
+    elif mtype == 'location':
+        func = bot.send_location
+        content = [message.location.latitude, message.location.longitude]
+    elif mtype == 'venue':
+        func = bot.send_venue
+        ven = message.venue
+        content = [
+            ven.location.latitude, ven.location.longitude,
+            ven.title, ven.address]
+    elif mtype == 'action':
+        pass
+        # sendChatAction
+        # action_string can be one of the following strings: 'typing',
+        # 'upload_photo', 'record_video', 'upload_video',
+        # 'record_audio', 'upload_audio', 'upload_document' or 'find_location'.
+        # bot.send_chat_action(chat_id, action_string)
+    else:
+        bot.send_message('Unsupported message type {}'.format(mtype))
 
-    def do(function, cid, content):
-        return function(cid, content)
+    def send(function, cid, content, kwargs):
+        return function(cid, *content, **kwargs)
 
     for receiver_id in _get_receivers():
-        do(func, receiver_id, content)
+        send(func, receiver_id, content, kwargs)
 
 
 def main():
-    bot.polling(none_stop=True)
+    send_to_admins("Bot restarted.", reply_markup=K_MAIN)
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        _stop_broadcast()
+        send_to_admins("Error occured: {}".format(e), reply_markup=K_MAIN)
 
 
 if __name__ == "__main__":
