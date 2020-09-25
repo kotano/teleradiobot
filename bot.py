@@ -1,7 +1,7 @@
 """Teleradiobot
 
-
 TODO:
+    * Add logs
     * Add tests
     * Better keyboard
     * Handle exceptions
@@ -9,6 +9,7 @@ TODO:
 """
 
 import json
+from datetime import datetime, timedelta
 from pprint import pprint
 
 import telebot
@@ -34,6 +35,9 @@ COMMANDS = {
 class Broadcast(object):
     def __init__(self) -> None:
         self.active = False
+        self.start_date = datetime.now()
+        self.timeout_date = datetime.now()
+        self.time_limit = timedelta(minutes=10)
 
     def show_keyboard(self):
         if self.active:
@@ -43,23 +47,50 @@ class Broadcast(object):
             keyboard = make_keyboard(['/broadcast', ' '])
         return keyboard
 
+    def start(self):
+        self.active = True
+        self.start_date = datetime.now()
+        self.timeout_date = self.start_date + self.time_limit
+
+    def stop(self):
+        self.active = False
+        self.timeout_date = datetime.now()
+
 
 broadcast = Broadcast()
 
 
 # @
-def check_permissions(func):
+
+
+def check_receiver(func):
     """Decorator. Check if the message sender has permissions."""
 
     def inner(message):
         uid = message.from_user.id
-        if message.from_user.id in _get_admin_ids():
+        if message.from_user.id in _get_speakers_ids():
             func(message)
         else:
             bot.send_message(
                 uid,
                 "You are not allowed to do this. "
                 "Please, /authorize")
+
+    return inner
+
+
+def check_admin(func):
+    """Decorator. Check if the message sender is a group administrator."""
+    def inner(message):
+        if not message.chat.type == 'private':
+            admins = bot.get_chat_administrators(message.chat.id)
+            admin_ids = map(lambda a: a.user.id, admins)
+            if message.from_user.id in admin_ids:
+                func(message)
+            else:
+                bot.reply_to(message, "You need admin privileges to do this. ")
+        else:
+            func(message)
 
     return inner
 
@@ -91,18 +122,18 @@ def update_config():
         json.dump(config, conf, indent=4)
 
 
-def send_to_admins(message, **kwargs):
-    for uid in _get_admin_ids():
+def send_to_speakers(message, **kwargs):
+    for uid in _get_speakers_ids():
         bot.send_message(uid, message, **kwargs)
 
 
-def _get_admin_names():
-    admin_names = [aid for username, aid in config["admins"]]
+def _get_speakers_names():
+    admin_names = [aid for username, aid in config["speakers"]]
     return admin_names
 
 
-def _get_admin_ids():
-    admin_ids = [aid for username, aid in config["admins"]]
+def _get_speakers_ids():
+    admin_ids = [aid for username, aid in config["speakers"]]
     return admin_ids
 
 
@@ -125,7 +156,7 @@ def _remove_receiver(receiver_index):
 
 
 def _add_admin(username, uid):
-    config["admins"].append([username, uid])
+    config["speakers"].append([username, uid])
     update_config()
 
 
@@ -153,7 +184,7 @@ def command_how_to(message):
 def authorize(message):
     if not message.chat.type == "private":
         return bot.reply_to(message, "Let's find some private place.")
-    if message.from_user.id in _get_admin_ids():
+    if message.from_user.id in _get_speakers_ids():
         bot.reply_to(message, "You're already authorized.")
         return
     msg = bot.reply_to(
@@ -184,12 +215,12 @@ def change_password(message):
     def handle_new_password(token):
         if token.text == config["token"]:
             def change_password(new_password):
-                config["admins"] = []
+                send_to_speakers(
+                    "Access password changed. Please, /authorize again.",
+                    reply_markup=K_MAIN)
+                config["speakers"] = []
                 config["password"] = new_password.text  # TODO: Refactor
                 update_config()
-                bot.send_message(
-                    message.chat.id,
-                    "Access password changed. Please, /authorize again.")
 
             msg = bot.send_message(
                 cid, "Enter new password", reply_markup=force_reply)
@@ -205,7 +236,7 @@ def change_password(message):
 
 
 @bot.message_handler(commands=['tune'])
-@check_permissions
+@check_admin
 def tune(message):
     """Add chat to the receivers group."""
     cid = message.chat.id
@@ -217,7 +248,7 @@ def tune(message):
 
 
 @bot.message_handler(commands=["detune"])
-@check_permissions
+@check_admin
 def detune(message):
     """Stop receiving messages from transmitter."""
     cid = message.chat.id
@@ -240,24 +271,33 @@ def detune(message):
 
 
 @bot.message_handler(commands=["broadcast"])
-@check_permissions
+@check_receiver
 def start_broadcast(message):
     """Start broadcasting messages to all your receivers."""
-    broadcast.active = True
+    broadcast.start()
     user = message.from_user.username
-    send_to_admins(
+    send_to_speakers(
         "{} started broadcasting.".format(user),
         reply_markup=broadcast.show_keyboard(),
         disable_notification=True)
 
 
 @bot.message_handler(commands=['endbroadcast'])
-@check_permissions
+@check_receiver
 def stop_broadcast(message):
-    _stop_broadcast()
-    send_to_admins(
+    broadcast.stop()
+    send_to_speakers(
         "Broadcast stopped.",
         reply_markup=broadcast.show_keyboard())
+
+
+def check_broadcast():
+    """Automatically stops broadcast after 10 minutes."""
+    if datetime.now() > broadcast.timeout_date:
+        broadcast.stop()
+        send_to_speakers(
+            "Broadcast timed out.",
+            reply_markup=broadcast.show_keyboard())
 
 
 main_content_types = [
@@ -268,10 +308,14 @@ main_content_types = [
 
 @bot.message_handler(content_types=main_content_types)
 def transmit(message):
+    pprint(message.__dict__)
+    print()
+    pprint(message.chat.__dict__)
+    check_broadcast()
     if any([
             not broadcast.active,
             message.chat.type != 'private',
-            message.from_user.id not in _get_admin_ids()]):
+            message.from_user.id not in _get_speakers_ids()]):
         return
 
     mtype = message.content_type
@@ -339,12 +383,12 @@ def transmit(message):
 
 
 def main():
-    send_to_admins("Bot restarted.", reply_markup=K_MAIN)
+    send_to_speakers("Bot restarted.", reply_markup=K_MAIN)
     try:
         bot.polling(none_stop=True)
     except Exception as e:
         _stop_broadcast()
-        send_to_admins("Error occured: {}".format(e), reply_markup=K_MAIN)
+        send_to_speakers("Error occured: {}".format(e), reply_markup=K_MAIN)
 
 
 if __name__ == "__main__":

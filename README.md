@@ -18,6 +18,6 @@ Here is the contents of json file:
     "token": "TOKENHERE",
     "password": "ACESSPASSWORDHERE",
     "receivers": [],
-    "admins": []
+    "speakers": []
 }
 ```
