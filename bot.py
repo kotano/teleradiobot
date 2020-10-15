@@ -1,6 +1,8 @@
+#!/usr/bin/env python
 """Teleradiobot
 
 TODO:
+    * Add channels support
     * Add logs
     * Add tests
     * Better keyboard
@@ -8,27 +10,41 @@ TODO:
     * Add localization
 """
 
+
 import json
+import pathlib
+import logging
 from datetime import datetime, timedelta
 from pprint import pprint
 
 import telebot
 
-with open("config.json", 'r') as conf:
+
+BASEDIR = pathlib.Path(__file__).parent
+CONFIG = BASEDIR / 'config.json'
+
+
+with open(CONFIG, 'r') as conf:
     config = json.load(conf)
 
-
 bot = telebot.TeleBot(config["token"], parse_mode="Markdown")
+
+botname = bot.get_me().username
+LOGFILE = BASEDIR / '{}.log'.format(botname)
+logging.basicConfig(
+    filename=LOGFILE, format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO, datefmt='%Y-%m-%d %H:%M:%S')
 
 COMMANDS = {
     "help": "Get help.",
     "howto": "Get explanaition on how to use bot.",
-    "authorize": "authorize yourself",
-    "tune": "Tune the radio.",
-    "detune": "Detune the radio.",
-    "broadcast": "Start broadcasting.",
-    "endbroadcast": "End broadcasting.",
-    "changepassword": "Change access password.",
+    "authorize": "Authorize. It will let you use broadcasting system.",
+    "tune": "Start receiving messages.",
+    "detune": "Stop receiving messages from speakers.",
+    "broadcast": "Start broadcasting messages to receivers.",
+    "endbroadcast": "End broadcasting messages.",
+    "changepassword": "Change access password. \
+        It will remove all authorized speakers.",
 }
 
 
@@ -95,6 +111,16 @@ def check_admin(func):
     return inner
 
 
+def log_message(message):
+    timestamp = message.date
+    message_date = datetime.fromtimestamp(
+        timestamp).strftime('%Y-%m-%d %H:%M:%S')
+    logmessage = "\n\tFrom: {} {} {} {} \n\t {}: {}".format(
+        message.chat.type, message.chat.id, message_date, message.content_type,
+        message.from_user.username, message.text)
+    logging.info(logmessage)
+
+
 def make_keyboard(firstrow=[], extra=[], width=1, last='/help', kwargs={}):
     """Add reply keyboard
 
@@ -128,7 +154,7 @@ def send_to_speakers(message, **kwargs):
 
 
 def _get_speakers_names():
-    admin_names = [aid for username, aid in config["speakers"]]
+    admin_names = [username for username, aid in config["speakers"]]
     return admin_names
 
 
@@ -165,6 +191,8 @@ def _add_admin(username, uid):
 
 @bot.message_handler(commands=['help', 'start'])
 def get_help(message):
+    if message.text == '/start':
+        log_message(message)
     info = '\n'.join(
         ["/{}: {}".format(command, description)
          for command, description in COMMANDS.items()])
@@ -195,9 +223,12 @@ def authorize(message):
 def grant_access(message):
     """Add user permission to broadcast."""
     cid = message.chat.id
+    uname = message.from_user.username
 
     if message.text == config["password"]:
-        _add_admin(message.chat.username, message.chat.id)
+        _add_admin(uname, cid)
+        logging.warning(
+            "{} with id {} is now authorized to broadcast.".format(uname, cid))
         bot.send_message(
             cid,
             "User {} is now authorized.".format(message.chat.username))
@@ -220,6 +251,7 @@ def change_password(message):
                     reply_markup=K_MAIN)
                 config["speakers"] = []
                 config["password"] = new_password.text  # TODO: Refactor
+                logging.warning("Access password was changed.")
                 update_config()
 
             msg = bot.send_message(
@@ -244,6 +276,7 @@ def tune(message):
         bot.send_message(cid, "Already on.")
         return
     _add_receiver(cid)
+    logging.info("Added new receiver: {}".format(message.chat.id))
     bot.send_message(cid, 'Listening...')
 
 
@@ -260,6 +293,7 @@ def detune(message):
         return
     # Remove chat from receivers group.
     _remove_receiver(receiver_index)
+    logging.info("Removed receiver: {}".format(message.chat.id))
     bot.send_message(
         cid,
         "You had your time, you had the power\n"
@@ -276,6 +310,7 @@ def start_broadcast(message):
     """Start broadcasting messages to all your receivers."""
     broadcast.start()
     user = message.from_user.username
+    logging.info("{} started broadcast.".format(user))
     send_to_speakers(
         "{} started broadcasting.".format(user),
         reply_markup=broadcast.show_keyboard(),
@@ -286,15 +321,17 @@ def start_broadcast(message):
 @check_receiver
 def stop_broadcast(message):
     broadcast.stop()
+    logging.info("Broadcast stopped.")
     send_to_speakers(
         "Broadcast stopped.",
         reply_markup=broadcast.show_keyboard())
 
 
-def check_broadcast():
+def prevent_false_broadcast():
     """Automatically stops broadcast after 10 minutes."""
     if datetime.now() > broadcast.timeout_date:
         broadcast.stop()
+        logging.info("Prevented broadcast transmission.")
         send_to_speakers(
             "Broadcast timed out.",
             reply_markup=broadcast.show_keyboard())
@@ -308,15 +345,13 @@ main_content_types = [
 
 @bot.message_handler(content_types=main_content_types)
 def transmit(message):
-    pprint(message.__dict__)
-    print()
-    pprint(message.chat.__dict__)
-    check_broadcast()
     if any([
             not broadcast.active,
             message.chat.type != 'private',
             message.from_user.id not in _get_speakers_ids()]):
         return
+    if message.chat.type == 'private':
+        prevent_false_broadcast()
 
     mtype = message.content_type
     func, content = None, []  # Made to avoid linter problems.
@@ -383,7 +418,7 @@ def transmit(message):
 
 
 def main():
-    send_to_speakers("Bot restarted.", reply_markup=K_MAIN)
+    logging.info("Program started.")
     try:
         bot.polling(none_stop=True)
     except Exception as e:
